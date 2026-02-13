@@ -25,7 +25,8 @@ class DB:
               user_id INTEGER PRIMARY KEY,
               full_name TEXT,
               username TEXT,
-              is_paid INTEGER DEFAULT 0
+              is_paid INTEGER DEFAULT 0,
+              seen_intro INTEGER DEFAULT 0
             )""")
 
             await db.execute("""
@@ -62,6 +63,20 @@ class DB:
               sort INTEGER DEFAULT 0,
               FOREIGN KEY(lesson_id) REFERENCES lessons(id)
             )""")
+
+            # NEW: settings (intro video file_id shu yerda saqlanadi)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS settings(
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            )""")
+
+            # Safe migrate (agar eski DB bo‘lsa)
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN seen_intro INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
             await db.commit()
 
     async def seed_modules_if_empty(self):
@@ -72,6 +87,21 @@ class DB:
                 for i, title in enumerate(DEFAULT_MODULES, start=1):
                     await db.execute("INSERT INTO modules(title, sort) VALUES(?, ?)", (title, i))
                 await db.commit()
+
+    # settings
+    async def set_setting(self, key: str, value: str):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO settings(key, value) VALUES(?,?)",
+                (key, value),
+            )
+            await db.commit()
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute("SELECT value FROM settings WHERE key=?", (key,))
+            row = await cur.fetchone()
+            return row[0] if row else None
 
     # users
     async def upsert_user(self, user_id: int, full_name: str, username: Optional[str]):
@@ -93,6 +123,20 @@ class DB:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("UPDATE users SET is_paid=? WHERE user_id=?", (1 if paid else 0, user_id))
             await db.commit()
+
+    async def mark_intro_seen(self, user_id: int):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE users SET seen_intro=1 WHERE user_id=?", (user_id,))
+            await db.commit()
+
+    async def list_users(self, paid_only: bool = False) -> List[int]:
+        async with aiosqlite.connect(self.path) as db:
+            if paid_only:
+                cur = await db.execute("SELECT user_id FROM users WHERE is_paid=1")
+            else:
+                cur = await db.execute("SELECT user_id FROM users")
+            rows = await cur.fetchall()
+            return [r[0] for r in rows]
 
     # payments
     async def create_payment(self, code: str, user_id: int):

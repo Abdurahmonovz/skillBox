@@ -12,7 +12,7 @@ from db import DB
 from keyboards import (
     kb_start, kb_payment, kb_admin_payment,
     kb_paid_menu, kb_modules, kb_lessons, kb_back_modules,
-    kb_admin_panel, kb_pick_module
+    kb_admin_panel, kb_pick_module, kb_broadcast_target
 )
 
 class PayState(StatesGroup):
@@ -28,6 +28,15 @@ class AdminState(StatesGroup):
 class AdminRename(StatesGroup):
     pick_module = State()
     new_title = State()
+
+# NEW: intro video set qilish
+class AdminIntro(StatesGroup):
+    waiting_intro_video = State()
+
+# NEW: broadcast
+class AdminBroadcast(StatesGroup):
+    pick_target = State()
+    waiting_message = State()
 
 def gen_code(user_id: int) -> str:
     return f"PY-{str(user_id)[-4:]}-{random.randint(1000,9999)}"
@@ -51,8 +60,34 @@ async def main():
     async def start(m: Message):
         await db.upsert_user(m.from_user.id, m.from_user.full_name, m.from_user.username)
         user = await db.get_user(m.from_user.id)
+
+        # NEW: ishonch/fayda matni
+        trust_text = (
+            "👋 Assalomu alaykum!\n\n"
+            "✅ Kurslar tartibli, bosqichma-bosqich beriladi.\n"
+            "✅ To‘lov tasdiqlansa kurs darhol ochiladi.\n"
+            "✅ Videolar va PDF’lar bot ichida saqlanadi.\n"
+            "✅ Savollaringiz bo‘lsa admin ko‘rib chiqadi.\n"
+        )
+        await m.answer(trust_text)
+
+        # NEW: intro video (faqat 1-marta)
+        intro_id = await db.get_setting("intro_video_file_id")
+        if intro_id and user and int(user.get("seen_intro", 0)) == 0:
+            try:
+                await bot.send_video(
+                    m.chat.id,
+                    intro_id,
+                    caption="🎬 Kursni qanday sotib olish va darslarni ochish bo‘yicha qo‘llanma",
+                    protect_content=True,
+                )
+                await db.mark_intro_seen(m.from_user.id)
+            except Exception:
+                pass
+
         if user and user.get("is_paid"):
             await m.answer("✅ Kurs sizda ochiq. '📚 Kurslar' ni bosing.", reply_markup=kb_paid_menu())
+
         await m.answer("Assalomu alaykum! Kurs uchun tugmani bosing:", reply_markup=kb_start())
 
     @dp.callback_query(F.data == "back")
@@ -138,7 +173,11 @@ async def main():
         if action == "ok":
             await db.set_payment_status(code, "approved")
             await db.set_paid(user_id, True)
-            await bot.send_message(user_id, "✅ <b>To'lov tasdiqlandi!</b>\n\nEndi '📚 Kurslar' bo‘limi ochiq.", reply_markup=kb_paid_menu())
+            await bot.send_message(
+                user_id,
+                "✅ <b>To'lov tasdiqlandi!</b>\n\nEndi '📚 Kurslar' bo‘limi ochiq.",
+                reply_markup=kb_paid_menu()
+            )
             await cb.answer("✅ Kurs ochildi")
         else:
             await db.set_payment_status(code, "rejected")
@@ -183,14 +222,13 @@ async def main():
         await cb.message.edit_text("🎬 <b>Darslar</b>\nTanlang:", reply_markup=kb_lessons(lessons, module_id))
         await cb.answer()
 
-    @dp.callback_query(F.data.startswith("l:") | F.data.startswith("l"))
+    @dp.callback_query(F.data.startswith("l:"))
     async def open_lesson(cb: CallbackQuery):
         user = await db.get_user(cb.from_user.id)
         if not user or not user.get("is_paid"):
             await cb.answer("❌ Avval kursni sotib oling!", show_alert=True)
             return
 
-        # callback_data: l:<lesson_id>
         parts = cb.data.split(":")
         lesson_id = int(parts[-1])
 
@@ -236,6 +274,72 @@ async def main():
         txt = "📚 <b>Modullar:</b>\n\n" + "\n".join([f"{m['id']}) {m['title']}" for m in modules])
         await cb.message.answer(txt)
         await cb.answer()
+
+    # NEW: Intro video sozlash
+    @dp.callback_query(F.data == "adm:set_intro")
+    async def adm_set_intro(cb: CallbackQuery, state: FSMContext):
+        if cb.from_user.id != cfg.ADMIN_ID:
+            return await cb.answer("Admin emas", show_alert=True)
+        await state.set_state(AdminIntro.waiting_intro_video)
+        await cb.message.answer("🎬 Intro video yuboring (oddiy video fayl).")
+        await cb.answer()
+
+    @dp.message(AdminIntro.waiting_intro_video, F.video)
+    async def adm_save_intro(m: Message, state: FSMContext):
+        if m.from_user.id != cfg.ADMIN_ID:
+            return
+        await db.set_setting("intro_video_file_id", m.video.file_id)
+        await state.clear()
+        await m.answer("✅ Intro video saqlandi. Endi yangi user /start qilsa avtomatik ko‘radi.", reply_markup=kb_admin_panel())
+
+    # NEW: Broadcast boshlash
+    @dp.callback_query(F.data == "adm:broadcast")
+    async def adm_broadcast_start(cb: CallbackQuery, state: FSMContext):
+        if cb.from_user.id != cfg.ADMIN_ID:
+            return await cb.answer("Admin emas", show_alert=True)
+        await state.set_state(AdminBroadcast.pick_target)
+        await cb.message.answer("📢 Reklamani kimlarga yuboramiz?", reply_markup=kb_broadcast_target())
+        await cb.answer()
+
+    @dp.callback_query(AdminBroadcast.pick_target, F.data.startswith("adm:bc:"))
+    async def adm_broadcast_pick(cb: CallbackQuery, state: FSMContext):
+        if cb.from_user.id != cfg.ADMIN_ID:
+            return await cb.answer("Admin emas", show_alert=True)
+        target = cb.data.split(":")[-1]  # all yoki paid
+        await state.update_data(target=target)
+        await state.set_state(AdminBroadcast.waiting_message)
+        await cb.message.answer("Endi reklama xabarini yuboring (matn/rasm/video/fayl).\nBekor qilish: /cancel")
+        await cb.answer()
+
+    @dp.message(AdminBroadcast.waiting_message)
+    async def adm_broadcast_send(m: Message, state: FSMContext):
+        if m.from_user.id != cfg.ADMIN_ID:
+            return
+
+        data = await state.get_data()
+        target = data.get("target", "all")
+        user_ids = await db.list_users(paid_only=(target == "paid"))
+
+        ok = 0
+        fail = 0
+
+        for uid in user_ids:
+            try:
+                await bot.copy_message(chat_id=uid, from_chat_id=m.chat.id, message_id=m.message_id)
+                ok += 1
+                await asyncio.sleep(0.05)
+            except Exception:
+                fail += 1
+
+        await state.clear()
+        await m.answer(f"✅ Reklama yuborildi!\nYuborildi: {ok}\nXatolik: {fail}", reply_markup=kb_admin_panel())
+
+    @dp.message(F.text == "/cancel")
+    async def cancel_any(m: Message, state: FSMContext):
+        if m.from_user.id != cfg.ADMIN_ID:
+            return
+        await state.clear()
+        await m.answer("❎ Bekor qilindi.", reply_markup=kb_admin_panel())
 
     # Modul nomini o‘zgartirish
     @dp.callback_query(F.data == "adm:rename_module")

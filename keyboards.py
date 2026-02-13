@@ -51,6 +51,11 @@ def kb_admin_panel():
     b.button(text="➕ Dars qo‘shish", callback_data="adm:add_lesson")
     b.button(text="✏️ Modul nomini o‘zgartirish", callback_data="adm:rename_module")
     b.button(text="📚 Modullarni ko‘rish", callback_data="adm:list_modules")
+
+    # NEW
+    b.button(text="🎬 Intro video sozlash", callback_data="adm:set_intro")
+    b.button(text="📢 Reklama / Broadcast", callback_data="adm:broadcast")
+
     b.adjust(1)
     return b.as_markup()
 
@@ -58,5 +63,12 @@ def kb_pick_module(modules, prefix: str):
     b = InlineKeyboardBuilder()
     for m in modules:
         b.button(text=f"📘 {m['title']}", callback_data=f"{prefix}:{m['id']}")
+    b.adjust(1)
+    return b.as_markup()
+
+def kb_broadcast_target():
+    b = InlineKeyboardBuilder()
+    b.button(text="👥 Hammaga", callback_data="adm:bc:all")
+    b.button(text="✅ Faqat to‘laganlarga", callback_data="adm:bc:paid")
     b.adjust(1)
     return b.as_markup()
