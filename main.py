@@ -29,17 +29,50 @@ class AdminRename(StatesGroup):
     pick_module = State()
     new_title = State()
 
-# NEW: intro video set qilish
 class AdminIntro(StatesGroup):
     waiting_intro_video = State()
 
-# NEW: broadcast
 class AdminBroadcast(StatesGroup):
     pick_target = State()
     waiting_message = State()
 
 def gen_code(user_id: int) -> str:
     return f"PY-{str(user_id)[-4:]}-{random.randint(1000,9999)}"
+
+def extract_video_file_id(m: Message) -> str | None:
+    """
+    Har qanday formatdagi video/file kelganda file_id ni chiqarib beradi.
+    MOV ko‘pincha document bo‘ladi.
+    """
+    if m.video:
+        return m.video.file_id
+    if getattr(m, "animation", None):
+        return m.animation.file_id
+    if m.document:
+        # Har qanday documentni qabul qilamiz (sen so‘ragandek)
+        return m.document.file_id
+    return None
+
+async def safe_send_video_or_file(bot: Bot, chat_id: int, file_id: str, caption: str, reply_markup=None):
+    """
+    file_id video bo‘lsa video qilib, bo‘lmasa fayl (document) qilib yuboradi.
+    """
+    try:
+        await bot.send_video(
+            chat_id,
+            file_id,
+            caption=caption,
+            protect_content=True,
+            reply_markup=reply_markup,
+        )
+    except Exception:
+        await bot.send_document(
+            chat_id,
+            file_id,
+            caption=caption,
+            protect_content=True,
+            reply_markup=reply_markup,
+        )
 
 async def main():
     cfg = Config()
@@ -61,7 +94,7 @@ async def main():
         await db.upsert_user(m.from_user.id, m.from_user.full_name, m.from_user.username)
         user = await db.get_user(m.from_user.id)
 
-        # NEW: ishonch/fayda matni
+        # ishonch/fayda matni
         trust_text = (
             "👋 Assalomu alaykum!\n\n"
             "✅ Kurslar tartibli, bosqichma-bosqich beriladi.\n"
@@ -71,15 +104,15 @@ async def main():
         )
         await m.answer(trust_text)
 
-        # NEW: intro video (faqat 1-marta)
+        # intro video (1 marta)
         intro_id = await db.get_setting("intro_video_file_id")
         if intro_id and user and int(user.get("seen_intro", 0)) == 0:
             try:
-                await bot.send_video(
+                await safe_send_video_or_file(
+                    bot,
                     m.chat.id,
                     intro_id,
-                    caption="🎬 Kursni qanday sotib olish va darslarni ochish bo‘yicha qo‘llanma",
-                    protect_content=True,
+                    "🎬 Kursni qanday sotib olish va darslarni ochish bo‘yicha qo‘llanma",
                 )
                 await db.mark_intro_seen(m.from_user.id)
             except Exception:
@@ -88,7 +121,7 @@ async def main():
         if user and user.get("is_paid"):
             await m.answer("✅ Kurs sizda ochiq. '📚 Kurslar' ni bosing.", reply_markup=kb_paid_menu())
 
-        await m.answer("Assalomu alaykum! Kurs uchun tugmani bosing:", reply_markup=kb_start())
+        await m.answer("Kurs uchun tugmani bosing:", reply_markup=kb_start())
 
     @dp.callback_query(F.data == "back")
     async def back(cb: CallbackQuery):
@@ -156,6 +189,11 @@ async def main():
 
         await m.answer("✅ Chek adminga yuborildi. Tasdiqlansa kurs ochiladi.", reply_markup=kb_start())
         await state.clear()
+
+    # ✅ PAYMENT state’da noto‘g‘ri narsa yuborilsa ham javob bersin
+    @dp.message(PayState.waiting_receipt)
+    async def receipt_wrong(m: Message):
+        await m.answer("❌ Iltimos, chekni <b>rasm</b> yoki <b>PDF</b> ko‘rinishida yuboring.")
 
     @dp.callback_query(F.data.startswith("ok:") | F.data.startswith("no:"))
     async def admin_payment(cb: CallbackQuery):
@@ -229,9 +267,7 @@ async def main():
             await cb.answer("❌ Avval kursni sotib oling!", show_alert=True)
             return
 
-        parts = cb.data.split(":")
-        lesson_id = int(parts[-1])
-
+        lesson_id = int(cb.data.split(":")[-1])
         lesson = await db.get_lesson(lesson_id)
         if not lesson:
             await cb.answer("Dars topilmadi", show_alert=True)
@@ -247,11 +283,11 @@ async def main():
             await bot.send_message(cb.from_user.id, "⚠️ Bu darsga video qo‘yilmagan.", reply_markup=kb_back_modules())
             return
 
-        await bot.send_video(
+        await safe_send_video_or_file(
+            bot,
             cb.from_user.id,
             lesson["video_file_id"],
-            caption=f"🎬 <b>{lesson['title']}</b>\n\n{lesson['description']}",
-            protect_content=True,
+            f"🎬 <b>{lesson['title']}</b>\n\n{lesson['description']}",
             reply_markup=kb_back_modules()
         )
 
@@ -275,24 +311,32 @@ async def main():
         await cb.message.answer(txt)
         await cb.answer()
 
-    # NEW: Intro video sozlash
+    # Intro video sozlash
     @dp.callback_query(F.data == "adm:set_intro")
     async def adm_set_intro(cb: CallbackQuery, state: FSMContext):
         if cb.from_user.id != cfg.ADMIN_ID:
             return await cb.answer("Admin emas", show_alert=True)
         await state.set_state(AdminIntro.waiting_intro_video)
-        await cb.message.answer("🎬 Intro video yuboring (oddiy video fayl).")
+        await cb.message.answer("🎬 Intro video yuboring (video yoki file bo‘lsa ham bo‘ladi).")
         await cb.answer()
 
-    @dp.message(AdminIntro.waiting_intro_video, F.video)
+    @dp.message(AdminIntro.waiting_intro_video, F.video | F.document | F.animation)
     async def adm_save_intro(m: Message, state: FSMContext):
         if m.from_user.id != cfg.ADMIN_ID:
             return
-        await db.set_setting("intro_video_file_id", m.video.file_id)
+        fid = extract_video_file_id(m)
+        if not fid:
+            await m.answer("❌ Video topilmadi. Qaytadan yuboring.")
+            return
+        await db.set_setting("intro_video_file_id", fid)
         await state.clear()
         await m.answer("✅ Intro video saqlandi. Endi yangi user /start qilsa avtomatik ko‘radi.", reply_markup=kb_admin_panel())
 
-    # NEW: Broadcast boshlash
+    @dp.message(AdminIntro.waiting_intro_video)
+    async def adm_save_intro_wrong(m: Message):
+        await m.answer("❌ Hozir intro uchun <b>video</b> yuboring (yoki file qilib yuborsangiz ham bo‘ladi).")
+
+    # Broadcast
     @dp.callback_query(F.data == "adm:broadcast")
     async def adm_broadcast_start(cb: CallbackQuery, state: FSMContext):
         if cb.from_user.id != cfg.ADMIN_ID:
@@ -406,17 +450,29 @@ async def main():
         lesson_id = await db.add_lesson(module_id, title, desc)
         await state.update_data(lesson_id=lesson_id)
         await state.set_state(AdminState.lesson_video)
-        await m.answer("Endi shu darsning VIDEOSINI yuboring (video fayl):")
+        await m.answer("Endi shu darsning VIDEOSINI yuboring (video yoki file bo‘lsa ham bo‘ladi):")
 
-    @dp.message(AdminState.lesson_video, F.video)
+    # ✅ Video bosqichi: video/document/animation — hammasi qabul
+    @dp.message(AdminState.lesson_video, F.video | F.document | F.animation)
     async def adm_lesson_video(m: Message, state: FSMContext):
         if m.from_user.id != cfg.ADMIN_ID:
             return
         data = await state.get_data()
         lesson_id = data["lesson_id"]
-        await db.set_lesson_video(lesson_id, m.video.file_id)
+
+        fid = extract_video_file_id(m)
+        if not fid:
+            await m.answer("❌ Video topilmadi. Qaytadan yuboring.")
+            return
+
+        await db.set_lesson_video(lesson_id, fid)
         await state.set_state(AdminState.lesson_pdfs)
         await m.answer("✅ Video saqlandi.\nEndi PDF(lar) yuboring (xohlagancha).\nTugatish uchun /done yozing.")
+
+    # ✅ Video bosqichida boshqa narsa yuborilsa javob bersin
+    @dp.message(AdminState.lesson_video)
+    async def adm_lesson_video_wrong(m: Message):
+        await m.answer("❌ Hozir video yuborishingiz kerak (video yoki file qilib yuboring).")
 
     @dp.message(AdminState.lesson_pdfs, F.document)
     async def adm_add_pdf(m: Message, state: FSMContext):
@@ -426,6 +482,13 @@ async def main():
         lesson_id = data["lesson_id"]
         await db.add_pdf(lesson_id, m.document.file_id)
         await m.answer("✅ PDF qo‘shildi. Yana yuborishingiz mumkin yoki /done.")
+
+    # ✅ PDF bosqichida boshqa narsa yuborilsa javob bersin
+    @dp.message(AdminState.lesson_pdfs)
+    async def adm_add_pdf_wrong(m: Message):
+        if m.text == "/done":
+            return
+        await m.answer("❌ Hozir PDF yuboring (📎 → File) yoki tugatish uchun /done yozing.")
 
     @dp.message(AdminState.lesson_pdfs, F.text == "/done")
     async def adm_done(m: Message, state: FSMContext):
